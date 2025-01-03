@@ -15,14 +15,16 @@
 
 #include <content/providers/view_provider.hpp>
 
-#include <fonts/codicons_font.h>
+#include <fonts/vscode_icons.hpp>
 
 #include <popups/popup_file_chooser.hpp>
 #include <content/popups/popup_blocking_task.hpp>
 #include <content/popups/hex_editor/popup_hex_editor_find.hpp>
 #include <pl/patterns/pattern.hpp>
+#include <wolv/literals.hpp>
 
 using namespace std::literals::string_literals;
+using namespace wolv::literals;
 
 namespace hex::plugin::builtin {
 
@@ -152,9 +154,9 @@ namespace hex::plugin::builtin {
                     u64 inputA = m_region.getStartAddress();
                     u64 inputB = m_region.getEndAddress();
 
-                    if (justOpened) {
+                    if (m_justOpened) {
                         ImGui::SetKeyboardFocusHere();
-                        justOpened = false;
+                        m_justOpened = false;
                     }
                     ImGuiExt::InputHexadecimal("hex.builtin.view.hex_editor.select.offset.begin"_lang, &inputA, ImGuiInputTextFlags_AutoSelectAll);
                     ImGuiExt::InputHexadecimal("hex.builtin.view.hex_editor.select.offset.end"_lang, &inputB, ImGuiInputTextFlags_AutoSelectAll);
@@ -171,9 +173,9 @@ namespace hex::plugin::builtin {
                     u64 inputA = m_region.getStartAddress();
                     u64 inputB = m_region.getSize();
 
-                    if (justOpened) {
+                    if (m_justOpened) {
                         ImGui::SetKeyboardFocusHere();
-                        justOpened = false;
+                        m_justOpened = false;
                     }
                     ImGuiExt::InputHexadecimal("hex.builtin.view.hex_editor.select.offset.begin"_lang, &inputA, ImGuiInputTextFlags_AutoSelectAll);
                     ImGuiExt::InputHexadecimal("hex.builtin.view.hex_editor.select.offset.size"_lang, &inputB, ImGuiInputTextFlags_AutoSelectAll);
@@ -215,7 +217,7 @@ namespace hex::plugin::builtin {
 
     private:
         Region m_region = { 0, 1 };
-        bool justOpened = true;
+        bool m_justOpened = true;
     };
 
     class PopupBaseAddress : public ViewHexEditor::Popup {
@@ -449,9 +451,24 @@ namespace hex::plugin::builtin {
 
             auto provider = ImHexApi::Provider::get();
             u32 patchCount = 0;
-            for (u64 i = 0; i < size; i += bytes.size()) {
-                auto remainingSize = std::min<size_t>(size - i, bytes.size());
-                provider->write(provider->getBaseAddress() + address + i, bytes.data(), remainingSize);
+
+            // Group the fill pattern into a larger chunk
+            constexpr static auto BatchFillSize = 1_MiB;
+            std::vector<u8> batchData;
+            if (bytes.size() < BatchFillSize) {
+                batchData.resize(std::min<u64>(alignTo<u64>(BatchFillSize, bytes.size()), size));
+                for (u64 i = 0; i < batchData.size(); i += bytes.size()) {
+                    auto remainingSize = std::min<size_t>(batchData.size() - i, bytes.size());
+                    std::copy_n(bytes.begin(), remainingSize, batchData.begin() + i);
+                }
+            } else {
+                batchData = std::move(bytes);
+            }
+
+            const auto startAddress = provider->getBaseAddress() + address;
+            for (u64 i = 0; i < size; i += batchData.size()) {
+                auto remainingSize = std::min<size_t>(size - i, batchData.size());
+                provider->write(startAddress + i, batchData.data(), remainingSize);
                 patchCount += 1;
             }
             provider->getUndoStack().groupOperations(patchCount, "hex.builtin.undo_operation.fill");
@@ -464,6 +481,47 @@ namespace hex::plugin::builtin {
         u64 m_size;
 
         std::string m_input;
+    };
+
+    class PopupPasteBehaviour final : public ViewHexEditor::Popup {
+    public:
+        explicit PopupPasteBehaviour(const Region &selection, const auto &pasteCallback) : m_selection(), m_pasteCallback(pasteCallback) {
+            m_selection = Region { .address=selection.getStartAddress(), .size=selection.getSize() };
+        }
+
+        void draw(ViewHexEditor *editor) override {
+            const auto width = ImGui::GetWindowWidth();
+
+            ImGui::TextWrapped("%s", "hex.builtin.view.hex_editor.menu.edit.paste.popup.description"_lang.get());
+            ImGui::TextUnformatted("hex.builtin.view.hex_editor.menu.edit.paste.popup.hint"_lang);
+
+            ImGui::Separator();
+
+            if (ImGui::Button("hex.builtin.view.hex_editor.menu.edit.paste.popup.button.selection"_lang, ImVec2(width / 4, 0))) {
+                m_pasteCallback(m_selection, true);
+                editor->closePopup();
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("hex.builtin.view.hex_editor.menu.edit.paste.popup.button.everything"_lang, ImVec2(width / 4, 0))) {
+                m_pasteCallback(m_selection, false);
+                editor->closePopup();
+            }
+
+            ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (width / 6));
+            if (ImGui::Button("hex.ui.common.cancel"_lang, ImVec2(width / 6, 0))) {
+                // Cancel the action, without updating settings nor pasting.
+                editor->closePopup();
+            }
+        }
+
+        [[nodiscard]] UnlocalizedString getTitle() const override {
+            return "hex.builtin.view.hex_editor.menu.edit.paste.popup.title"_lang;
+        }
+
+    private:
+        Region m_selection;
+        std::function<void(const Region &selection, bool selectionCheck)> m_pasteCallback;
     };
 
     /* Hex Editor */
@@ -492,7 +550,15 @@ namespace hex::plugin::builtin {
             return result;
         });
 
+        static bool showHighlights = true;
+        ContentRegistry::Settings::onChange("hex.builtin.setting.hex_editor", "hex.builtin.setting.hex_editor.show_highlights", [](const ContentRegistry::Settings::SettingsValue &value) {
+            showHighlights = value.get<bool>(true);
+        });
+
         m_hexEditor.setBackgroundHighlightCallback([this](u64 address, const u8 *data, size_t size) -> std::optional<color_t> {
+            if (!showHighlights)
+                return std::nullopt;
+
             if (auto highlight = m_backgroundHighlights->find(address); highlight != m_backgroundHighlights->end()) {
                 if (std::ranges::any_of(*m_hoverHighlights, [region = Region(address, size)](const Region &highlight) { return highlight.overlaps(region); }))
                     return ImAlphaBlendColors(highlight->second, 0xA0FFFFFF);
@@ -520,6 +586,9 @@ namespace hex::plugin::builtin {
         });
 
         m_hexEditor.setHoverChangedCallback([this](u64 address, size_t size) {
+            if (!showHighlights)
+                return;
+
             m_hoverHighlights->clear();
 
             if (Region(address, size) == Region::Invalid())
@@ -532,6 +601,9 @@ namespace hex::plugin::builtin {
         });
 
         m_hexEditor.setTooltipCallback([](u64 address, const u8 *data, size_t size) {
+            if (!showHighlights)
+                return;
+
             for (const auto &[id, callback] : ImHexApi::HexEditor::impl::getTooltipFunctions()) {
                 callback(address, data, size);
             }
@@ -685,7 +757,7 @@ namespace hex::plugin::builtin {
         ImGui::SetClipboardText(result.c_str());
     }
 
-    static void pasteBytes(const Region &selection, bool selectionCheck) {
+    static void pasteBytes(const Region &selection, bool selectionCheck, bool asPlainText) {
         auto provider = ImHexApi::Provider::get();
         if (provider == nullptr)
             return;
@@ -694,7 +766,14 @@ namespace hex::plugin::builtin {
         if (clipboard == nullptr)
             return;
 
-        auto buffer = parseHexString(clipboard);
+        std::vector<u8> buffer;
+        if (asPlainText) {
+            // Directly reinterpret clipboard as an array of bytes
+            std::string cp = clipboard;
+            buffer = std::vector<u8>(cp.begin(), cp.end());
+        }
+        else
+            buffer = parseHexString(clipboard);
 
         if (!selectionCheck) {
             if (selection.getStartAddress() + buffer.size() >= provider->getActualSize())
@@ -704,6 +783,36 @@ namespace hex::plugin::builtin {
         // Write bytes
         auto size = selectionCheck ? std::min(buffer.size(), selection.getSize()) : buffer.size();
         provider->write(selection.getStartAddress(), buffer.data(), size);
+    }
+
+    void ViewHexEditor::processPasteBehaviour(const Region &selection) {
+        if (selection.getSize() > 1) {
+            // Apply normal "paste over selection" behaviour when pasting over several bytes
+            pasteBytes(selection, true, false);
+            return;
+        }
+
+        // Selection is over one byte, we have to check the settings to decide the course of action
+
+        auto setting = ContentRegistry::Settings::read<std::string>(
+            "hex.builtin.setting.hex_editor",
+            "hex.builtin.setting.hex_editor.paste_behaviour",
+            "none");
+
+        if (setting == "everything")
+            pasteBytes(selection, false, false);
+        else if (setting == "selection")
+            pasteBytes(selection, true, false);
+        else
+            this->openPopup<PopupPasteBehaviour>(selection,
+                [](const Region &selection, const bool selectionCheck) {
+                    ContentRegistry::Settings::write<std::string>(
+                        "hex.builtin.setting.hex_editor",
+                        "hex.builtin.setting.hex_editor.paste_behaviour",
+                        selectionCheck ? "selection" : "everything");
+                    pasteBytes(selection, selectionCheck, false);
+                });
+
     }
 
     static void copyString(const Region &selection) {
@@ -1015,6 +1124,26 @@ namespace hex::plugin::builtin {
         ContentRegistry::Settings::onChange("hex.builtin.setting.hex_editor", "hex.builtin.setting.hex_editor.char_padding", [this](const ContentRegistry::Settings::SettingsValue &value) {
             m_hexEditor.setCharacterCellPadding(value.get<int>(0));
         });
+
+        static bool showSelectionInWindowFooter = true;
+        ContentRegistry::Settings::onChange("hex.builtin.setting.hex_editor", "hex.builtin.setting.hex_editor.show_selection", [this](const ContentRegistry::Settings::SettingsValue &value) {
+            const auto show = value.get<bool>(false);
+
+            m_hexEditor.setShowSelectionInFooter(show);
+            showSelectionInWindowFooter = !show;
+        });
+
+        ContentRegistry::Interface::addFooterItem([] {
+            if (!showSelectionInWindowFooter) return;
+
+            if (auto selection = ImHexApi::HexEditor::getSelection(); selection.has_value()) {
+                ImGuiExt::TextFormatted("0x{0:02X} - 0x{1:02X} (0x{2:02X} | {2} bytes)",
+                    selection->getStartAddress(),
+                    selection->getEndAddress(),
+                    selection->getSize()
+                );
+            }
+        });
     }
 
     void ViewHexEditor::registerMenuItems() {
@@ -1108,7 +1237,7 @@ namespace hex::plugin::builtin {
 
         /* Copy As */
         ContentRegistry::Interface::addMenuItem({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.copy_as", "hex.builtin.view.hex_editor.copy.ascii" }, ICON_VS_SYMBOL_TEXT, 1200,
-                                                CurrentView + CTRLCMD + SHIFT + Keys::C,
+                                                CurrentView + ALT + Keys::C,
                                                 [] {
                                                     auto selection = ImHexApi::HexEditor::getSelection();
                                                     if (selection.has_value() && selection != Region::Invalid())
@@ -1154,9 +1283,27 @@ namespace hex::plugin::builtin {
                             callback(
                                     provider,
                                     selection->getStartAddress(),
-                                    selection->size
+                                    selection->size,
+                                    false
                             ).c_str()
                     );
+                }
+
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    const auto previewText = callback(
+                        provider,
+                        selection->getStartAddress(),
+                        std::min<u64>(selection->size, 32),
+                        true
+                    );
+
+                    if (!previewText.empty()) {
+                        if (ImGui::BeginTooltip()) {
+                            ImGuiExt::Header("hex.builtin.view.hex_editor.menu.edit.copy_as.preview"_lang, true);
+                            ImGui::TextDisabled("%s", previewText.c_str());
+                            ImGui::EndTooltip();
+                        }
+                    }
                 }
             }
         },
@@ -1166,16 +1313,28 @@ namespace hex::plugin::builtin {
 
         /* Paste */
         ContentRegistry::Interface::addMenuItem({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.paste" }, ICON_VS_OUTPUT, 1450, CurrentView + CTRLCMD + Keys::V,
-                                                [] {
-                                                    pasteBytes(ImHexApi::HexEditor::getSelection().value_or( ImHexApi::HexEditor::ProviderRegion(Region { 0, 0 }, ImHexApi::Provider::get())), true);
+                                                [this] {
+                                                    processPasteBehaviour(ImHexApi::HexEditor::getSelection().value_or( ImHexApi::HexEditor::ProviderRegion(Region { 0, 0 }, ImHexApi::Provider::get())));
                                                 },
                                                 ImHexApi::HexEditor::isSelectionValid,
                                                 this);
 
-        /* Paste All */
-        ContentRegistry::Interface::addMenuItem({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.paste_all" }, ICON_VS_CLIPPY, 1500, CurrentView + CTRLCMD + SHIFT + Keys::V,
+        /* Paste... */
+        ContentRegistry::Interface::addMenuItemSubMenu({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.paste_as" }, ICON_VS_CLIPPY, 1490, []{}, ImHexApi::HexEditor::isSelectionValid);
+
+        /* Paste... > Paste all */
+        ContentRegistry::Interface::addMenuItem({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.paste_as", "hex.builtin.view.hex_editor.menu.edit.paste_all" }, ICON_VS_CLIPPY, 1500, CurrentView + CTRLCMD + SHIFT + Keys::V,
                                                 [] {
-                                                    pasteBytes(ImHexApi::HexEditor::getSelection().value_or( ImHexApi::HexEditor::ProviderRegion(Region { 0, 0 }, ImHexApi::Provider::get())), false);
+                                                    pasteBytes(ImHexApi::HexEditor::getSelection().value_or( ImHexApi::HexEditor::ProviderRegion(Region { 0, 0 }, ImHexApi::Provider::get())), false, false);
+                                                },
+                                                ImHexApi::HexEditor::isSelectionValid,
+                                                this);
+
+        /* Paste... > Paste all as string */
+        ContentRegistry::Interface::addMenuItem({ "hex.builtin.menu.edit", "hex.builtin.view.hex_editor.menu.edit.paste_as", "hex.builtin.view.hex_editor.menu.edit.paste_all_string" }, ICON_VS_SYMBOL_TEXT, 1510,
+                                                Shortcut::None,
+                                                [] {
+                                                    pasteBytes(ImHexApi::HexEditor::getSelection().value_or( ImHexApi::HexEditor::ProviderRegion(Region { 0, 0 }, ImHexApi::Provider::get())), false, true);
                                                 },
                                                 ImHexApi::HexEditor::isSelectionValid,
                                                 this);
@@ -1278,13 +1437,17 @@ namespace hex::plugin::builtin {
                                                         return (value >= provider->getBaseAddress()) && (value < (provider->getBaseAddress() + provider->getActualSize()));
                                                     };
 
+                                                    ImGui::PushID(1);
                                                     if (ImGui::MenuItem(hex::format("0x{:08X}", littleEndianValue).c_str(), "hex.ui.common.little_endian"_lang, false, canJumpTo(littleEndianValue))) {
                                                         ImHexApi::HexEditor::setSelection(littleEndianValue, 1);
                                                     }
+                                                    ImGui::PopID();
 
+                                                    ImGui::PushID(2);
                                                     if (ImGui::MenuItem(hex::format("0x{:08X}", bigEndianValue).c_str(), "hex.ui.common.big_endian"_lang, false, canJumpTo(bigEndianValue))) {
                                                         ImHexApi::HexEditor::setSelection(bigEndianValue, 1);
                                                     }
+                                                    ImGui::PopID();
 
                                                     if (ImGui::MenuItem("hex.builtin.view.hex_editor.menu.edit.jump_to.curr_pattern"_lang, "", false, selection.has_value() && ContentRegistry::PatternLanguage::getRuntime().getCreatedPatternCount() > 0)) {
                                                         auto patterns = ContentRegistry::PatternLanguage::getRuntime().getPatternsAtAddress(selection->getStartAddress());

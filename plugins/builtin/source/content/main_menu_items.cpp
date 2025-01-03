@@ -223,7 +223,7 @@ namespace hex::plugin::builtin {
                                                 provider
                                             });
 
-                            auto result = formatter.callback(provider, selection.getStartAddress(), selection.getSize());
+                            auto result = formatter.callback(provider, selection.getStartAddress(), selection.getSize(), false);
 
                             wolv::io::File file(path, wolv::io::File::Mode::Create);
                             if (!file.isValid()) {
@@ -297,12 +297,12 @@ namespace hex::plugin::builtin {
                         }
 
                         if (data.has_value()) {
-                            file.writeVector(data.value());
+                            const auto& bytes = data.value();
+                            file.writeVector(bytes);
+                            EventPatchCreated::post(bytes.data(), bytes.size(), PatchKind::IPS);
                         } else {
                             handleIPSError(data.error());
                         }
-
-                        AchievementManager::unlockAchievement("hex.builtin.achievement.hex_editor", "hex.builtin.achievement.hex_editor.create_patch.name");
                     });
                 });
             });
@@ -336,12 +336,12 @@ namespace hex::plugin::builtin {
                         }
 
                         if (data.has_value()) {
-                            file.writeVector(data.value());
+                            const std::vector<u8>& bytes = data.value();
+                            file.writeVector(bytes);
+                            EventPatchCreated::post(bytes.data(), bytes.size(), PatchKind::IPS32);
                         } else {
                             handleIPSError(data.error());
                         }
-
-                        AchievementManager::unlockAchievement("hex.builtin.achievement.hex_editor", "hex.builtin.achievement.hex_editor.create_patch.name");
                     });
                 });
             });
@@ -541,6 +541,7 @@ namespace hex::plugin::builtin {
                     glfwSetWindowMonitor(window, monitor, 0, 0, videoMode->width, videoMode->height, videoMode->refreshRate);
                 } else {
                     glfwSetWindowMonitor(window, nullptr, position.x, position.y, size.x, size.y, 0);
+                    glfwSetWindowAttrib(window, GLFW_DECORATED, ImHexApi::System::isBorderlessWindowModeEnabled() ? GLFW_FALSE : GLFW_TRUE);
                 }
 
             }, []{ return true; }, []{ return glfwGetWindowMonitor(ImHexApi::System::getMainWindowHandle()) != nullptr; });

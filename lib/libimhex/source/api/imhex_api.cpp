@@ -11,6 +11,7 @@
 #include <wolv/utils/string.hpp>
 
 #include <utility>
+#include <numeric>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -18,11 +19,17 @@
 #include <algorithm>
 #include <GLFW/glfw3.h>
 
+#include <hex/helpers/utils_macos.hpp>
+
 #if defined(OS_WINDOWS)
     #include <windows.h>
 #else
     #include <sys/utsname.h>
     #include <unistd.h>
+#endif
+
+#if defined(OS_WEB)
+    #include <emscripten.h>
 #endif
 
 namespace hex {
@@ -608,6 +615,32 @@ namespace hex {
             return impl::s_nativeScale;
         }
 
+        float getBackingScaleFactor() {
+            #if defined(OS_WINDOWS)
+                return 1.0F;
+            #elif defined(OS_MACOS)
+                return ::getBackingScaleFactor();
+            #elif defined(OS_LINUX)
+                if (std::string_view(::getenv("XDG_SESSION_TYPE")) == "x11")
+                    return 1.0F;
+                else {
+                    float xScale = 0, yScale = 0;
+                    glfwGetMonitorContentScale(glfwGetPrimaryMonitor(), &xScale, &yScale);
+
+                    return std::midpoint(xScale, yScale);
+                }
+            #elif defined(OS_WEB)
+                return 1.0F;
+                /*
+                return EM_ASM_INT({
+                    return window.devicePixelRatio;
+                });
+                */
+            #else
+                return 1.0F;
+            #endif
+        }
+
 
         ImVec2 getMainWindowPosition() {
             if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != ImGuiConfigFlags_None)
@@ -643,6 +676,14 @@ namespace hex {
 
         void* getLibImHexModuleHandle() {
             return hex::getContainingModule(reinterpret_cast<void*>(&getLibImHexModuleHandle));
+        }
+
+        void addMigrationRoutine(SemanticVersion migrationVersion, std::function<void()> function) {
+            EventImHexUpdated::subscribe([migrationVersion, function](const SemanticVersion &oldVersion, const SemanticVersion &newVersion) {
+                if (oldVersion < migrationVersion && newVersion >= migrationVersion) {
+                    function();
+                }
+            });
         }
 
 
@@ -794,16 +835,11 @@ namespace hex {
             return { { name, version } };
         }
 
-        std::string getImHexVersion(bool withBuildType) {
+        SemanticVersion getImHexVersion() {
             #if defined IMHEX_VERSION
-                if (withBuildType) {
-                    return IMHEX_VERSION;
-                } else {
-                    auto version = std::string(IMHEX_VERSION);
-                    return version.substr(0, version.find('-'));
-                }
+                return SemanticVersion(IMHEX_VERSION);
             #else
-                return "Unknown";
+                return {};
             #endif
         }
 
@@ -815,7 +851,7 @@ namespace hex {
                     return std::string(GIT_COMMIT_HASH_LONG).substr(0, 7);
                 }
             #else
-                hex::unused(longHash);
+                std::ignore = longHash;
                 return "Unknown";
             #endif
         }
@@ -837,7 +873,7 @@ namespace hex {
         }
 
         bool isNightlyBuild() {
-            return getImHexVersion(false).ends_with("WIP");
+            return getImHexVersion().nightly();
         }
 
         bool updateImHex(UpdateType updateType) {

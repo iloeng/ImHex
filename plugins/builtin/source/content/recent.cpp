@@ -16,7 +16,7 @@
 
 #include <content/recent.hpp>
 #include <toasts/toast_notification.hpp>
-#include <fonts/codicons_font.h>
+#include <fonts/vscode_icons.hpp>
 
 #include <ranges>
 #include <unordered_set>
@@ -320,7 +320,7 @@ namespace hex::plugin::builtin::recent {
                     }
 
                     if (ImGui::BeginPopup(popupID.c_str())) {
-                        if (ImGui::MenuItem("hex.ui.common.remove"_lang)) {
+                        if (ImGui::MenuItemEx("hex.ui.common.remove"_lang, ICON_VS_REMOVE)) {
                             shouldRemove = true;
                         }
                         ImGui::EndPopup();
@@ -347,6 +347,10 @@ namespace hex::plugin::builtin::recent {
     }
 
     void addMenuItems() {
+        #if defined(OS_WEB)
+            return;
+        #endif
+
         ContentRegistry::Interface::addMenuItemSubMenu({ "hex.builtin.menu.file" }, 1200, [] {
             if (ImGui::BeginMenuEx("hex.builtin.menu.file.open_recent"_lang, ICON_VS_ARCHIVE, !recent::s_recentEntriesUpdating && !s_recentEntries.empty())) {
                 // Copy to avoid changing list while iteration
