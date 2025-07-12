@@ -25,6 +25,7 @@ option(IMHEX_ENABLE_IMGUI_TEST_ENGINE   "Enable the ImGui Test Engine"          
 option(IMHEX_ENABLE_PRECOMPILED_HEADERS "Enable precompiled headers"                                                            OFF)
 option(IMHEX_COMPRESS_DEBUG_INFO        "Compress debug information"                                                            ON )
 option(IMHEX_ENABLE_CXX_MODULES         "Enable C++20 Module compilation. Testing only!"                                        OFF)
+option(IMHEX_ENABLE_CPPCHECK            "Enable cppcheck static analysis"                                                       OFF)
 
 set(IMHEX_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}")
 set(CMAKE_MODULE_PATH "${IMHEX_BASE_FOLDER}/cmake/modules")
@@ -38,8 +39,6 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ${IMHEX_ENABLE_CXX_MODULES})
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include("${IMHEX_BASE_FOLDER}/cmake/build_helpers.cmake")
-
-add_compile_options("-fsanitize=address")
 
 # Setup project
 loadVersion(IMHEX_VERSION IMHEX_VERSION_PLAIN)
