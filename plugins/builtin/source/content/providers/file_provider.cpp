@@ -328,12 +328,14 @@ namespace hex::plugin::builtin {
                     if (!m_data.empty()) {
                         m_changeTracker = wolv::io::ChangeTracker(m_file);
                         m_changeTracker.startTracking([this]{ this->handleFileChange(); });
-                        m_file.close();
                         m_loadedIntoMemory = true;
                     }
                 }
             }
         }
+
+        if (m_loadedIntoMemory)
+            m_file.close();
 
         m_changeEventAcknowledgementPending = false;
 
